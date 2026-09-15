@@ -1,0 +1,30 @@
+[package]
+name = "archivindex-substack-scraper"
+description = "Download Substack posts and read and write WARC archives"
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
+
+[dependencies]
+archivindex-substack-model.workspace = true
+archivindex-warc.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

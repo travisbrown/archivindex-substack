@@ -1,0 +1,6 @@
+/target/
+/tmp/
+/data/
+*.warc
+*.warc.gz
+.env

@@ -1,0 +1,33 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install workspace policy checker
+        run: >-
+          cargo install --locked --git https://github.com/travisbrown/archivindex
+          --rev f6e131cb8255090c5384f6cdcb099348247ad1ff cargo-archivindex-build
+      - name: Check workspace policy
+        run: cargo archivindex-build check
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace --all-features
+      - run: cargo doc --locked --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - run: cargo check --locked --workspace --all-targets
