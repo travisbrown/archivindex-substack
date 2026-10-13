@@ -1,4 +1,6 @@
-//! Substack post data, including unknown fields introduced by the publication API.
+//! Substack post and public profile data, retaining unmodeled API fields.
+
+pub mod profile;
 
 use std::collections::BTreeMap;
 use std::str::FromStr;

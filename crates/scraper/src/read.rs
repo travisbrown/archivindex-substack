@@ -41,7 +41,7 @@ fn collect<R: BufRead + Read>(reader: WarcReader<R>) -> Result<ArchiveContents, 
         let Some(endpoint) = Endpoint::from_url(&parsed) else {
             continue;
         };
-        let response = archivindex_warc::record::http::ResponseMetadata::parse(&body)
+        let response = archivindex_http::message::ResponseMetadata::parse(&body)
             .ok_or("invalid archived HTTP response")?;
         let entity = payload::entity_body(&body)?;
         if response.header("transfer-encoding").is_none()

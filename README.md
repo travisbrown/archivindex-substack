@@ -1,19 +1,19 @@
 # archivindex-substack
 
-Rust libraries and a command-line tool for downloading Substack publication posts, archiving HTTP
-responses in WARC files, and exporting captured JSON for analysis. Follows the model / scraper / CLI
-workspace layout of `archivindex-gravatar` and `archivindex-wordpress`, using their shared
-`archivindex-warc` library.
+Rust libraries and a command-line tool for resolving Substack users, downloading publication posts,
+archiving HTTP responses in WARC files, and exporting captured post JSON for analysis. Follows the
+model / scraper / CLI workspace layout of `archivindex-gravatar` and `archivindex-wordpress`, using
+their shared `archivindex-warc` library.
 
-| Crate                                                    | Purpose                                                           |
-| -------------------------------------------------------- | ----------------------------------------------------------------- |
-| [`archivindex-substack-model`](crates/model/)            | Post and author models; validated post slugs                      |
-| [`archivindex-substack-scraper`](crates/scraper/)        | Pagination, HTTP capture, WARC output, archive reading and resume |
-| [`archivindex-substack-scraper-cli`](tools/scraper-cli/) | `archive`, `export`, and `inspect` commands                       |
+| Crate                                                    | Purpose                                                            |
+| -------------------------------------------------------- | ------------------------------------------------------------------ |
+| [`archivindex-substack-model`](crates/model/)            | Post, author, and public profile models; validated post slugs      |
+| [`archivindex-substack-scraper`](crates/scraper/)        | User resolution, publication capture, and WARC reading and writing |
+| [`archivindex-substack-scraper-cli`](tools/scraper-cli/) | Resolution, `archive`, `export`, and `inspect` commands            |
 
 ## Getting started
 
-Requires Rust 1.97 or later. Install the CLI:
+Requires Rust 1.98 or later. Install the CLI:
 
 ```console
 cargo install --locked --path tools/scraper-cli
@@ -39,6 +39,96 @@ archivindex-substack-scraper archive --publication https://example.com \
   --max-posts 5 --output data/example-01.warc.gz
 ```
 
+## User resolution
+
+Resolve a numeric Substack user ID to its handle, profile slug, or complete public profile:
+
+```sh
+archivindex-substack-scraper resolve-handle 330239969
+archivindex-substack-scraper resolve-slug 330239969
+archivindex-substack-scraper resolve-user 330239969 > profile.json
+```
+
+`resolve-handle` sends `HEAD /profile/{id}` and reads the `/@handle` redirect without following it.
+`resolve-user` then requests `/api/v1/user/{handle}/public_profile`. `resolve-slug` uses the same
+requests and selects the profile's `slug` field, which can differ from its handle. The profile's
+numeric ID must match the requested user. Profile JSON retains all fields, including unknown nested
+data and explicit nulls; only the ID and slug have a fixed model schema.
+
+Resolved handles and slugs go to stdout as one line; profiles as one JSON object. A missing user,
+an existing user without a handle, a profile returning 404, or an empty slug produces no stdout and
+exits successfully, with an explanation on stderr. The handle command distinguishes a missing user
+(404) from an existing user without a handle (200). Unexpected statuses, malformed redirects,
+invalid profiles, and incomplete captures exit unsuccessfully. Resolution is public and does not
+read `SUBSTACK_COOKIE`.
+
+Look up a handle directly to print its numeric user ID and profile slug as `id-slug`:
+
+```sh
+archivindex-substack-scraper lookup-handle ssmanhh
+archivindex-substack-scraper lookup-handle @ssmanhh
+```
+
+Both forms request `/api/v1/user/ssmanhh/public_profile` directly, without a HEAD lookup. Output
+has the form `330239969-ss-man`, followed by a newline. An empty profile slug produces `id-`.
+A missing profile (404) produces no stdout and exits successfully, with an explanation on stderr.
+Invalid handles, unexpected statuses, malformed profiles, and incomplete captures are errors.
+
+All profile lookup and resolution commands, and `archive`, accept `--proxy` and `--show-ip`:
+
+```sh
+archivindex-substack-scraper resolve-user 330239969 \
+  --proxy socks5h://127.0.0.1:1080 --show-ip > profile.json
+```
+
+`socks5h://` sends destination hostnames to the proxy for DNS resolution; `socks5://` resolves
+them locally. Both accept optional `user:password@host:port` authentication and default to port
+1080. The proxy applies to every request made by the command, including the IP check and any
+retries. Proxy failures never fall back to direct connections. Without `--proxy`, commands connect
+directly and ignore environment proxy settings. Proxy credentials are excluded from HTTP requests
+and WARC metadata; recorded `warcinfo` identifies the configured proxy URI with its credentials
+removed.
+
+`--show-ip` queries `https://api.ipify.org/` through the same transport and prints
+`Public IP address: ...` to stderr before contacting Substack. It also works without a proxy.
+The check makes one attempt, accepts IPv4 or IPv6, and stops the command on connection errors,
+unsuccessful statuses, redirects, invalid addresses, or truncated responses. The IP check is not
+included in the retained WARC and never receives the publication cookie. Stdout remains reserved
+for command results. For publication capture:
+
+```sh
+archivindex-substack-scraper archive --publication on --output data/on.warc.gz \
+  --proxy socks5h://127.0.0.1:1080 --show-ip
+```
+
+Add `--output` to retain the lookup in a WARC file:
+
+```sh
+archivindex-substack-scraper resolve-user 330239969 --output data/profile.warc.gz > profile.json
+archivindex-substack-scraper resolve-handle 330239969 --output data/handle.warc
+```
+
+All network requests use `archivindex-archiver`. Resolution WARCs contain any HEAD exchange, profile
+GET, and retry responses, including failed lookups and 404s. Without `--output`, a temporary WARC is
+created and removed after resolution. Output paths must be new, with existing parent directories.
+The archiver writes through a `.partial` file and publishes the WARC when recording finishes;
+recording failures may leave the partial file for recovery. A `.gz` suffix or `--gzip` enables
+compression. The `export` and `inspect` commands currently recognize publication captures only, so
+use a general WARC reader for resolution archives.
+
+Requests start at least 1.5 seconds apart, configurable with `--delay SECONDS`. This includes
+retries and later lookups made with the same resolver. Each capture has a 30-second timeout and a 16
+MiB response limit, including headers, configurable through `resolve::Config` in the scraper
+library. The archiver retries transient transport failures, 429, 500, 502, 503, and 504 responses,
+up to six attempts per request. Backoff starts at five seconds, doubles, and is capped at five
+minutes. A valid `Retry-After` overrides backoff, subject to that cap. These rules differ from
+`substarch`, which retries only 429 and 503 and stops when `Retry-After` exceeds its cap.
+Publication capture uses the same transport, with its own pacing and no automatic retries.
+
+The lookup routes and response semantics come from `substarch`. They are undocumented Substack web
+API behavior; the migration tests use local servers rather than live requests. Profile archiving
+through these commands does not include the old feed traversal or user-extraction commands.
+
 ## Capture and resume
 
 The downloader requests `/api/v1/archive?sort=new&offset=0&limit=20`, then fetches each distinct
@@ -52,8 +142,9 @@ Requests start at least two seconds apart by default. `--delay SECONDS` override
 the default is a conservative local setting, not a documented service quota. A terminal spinner on
 stderr shows elapsed time and completed post lookups. It is hidden when stderr is not a terminal.
 
-Every capture is flushed before the next request. Resume into a **new** file, supplying all previous
-segments from the session:
+Every capture is flushed to `<output>.partial` before the next request. The requested output file
+appears when the run finishes, including when an HTTP or validation error stops it. Resume into a
+**new** file, supplying all previous segments from the session:
 
 ```sh
 archivindex-substack-scraper archive --publication on \
@@ -81,10 +172,12 @@ responses are retained before reporting errors, including `Retry-After` and `Loc
 supplied. A listing 404 is an error, since it does not establish that the publication is empty. Only
 a post 404 counts as a completed missing lookup.
 
-Output files are created exclusively and never overwritten or appended to. The parent directory
-must exist. Gzip is enabled by `.gz` or `--gzip`; readers detect compression from file bytes.
-Malformed or truncated WARC framing causes a read error and requires repair before resume. A hard
-termination or disk failure during a write can leave a partial final record.
+Output files are created exclusively and never overwritten or appended to. An existing output or
+its `.partial` file prevents capture. The parent directory must exist. Gzip is enabled by `.gz` or
+`--gzip`; readers detect compression from file bytes. A hard termination, disk failure, or failure
+to publish the final output can leave the `.partial` file for recovery. A readable partial file can
+be passed to `--resume-from` with a new output path. Broken WARC framing requires repair before
+resume.
 
 ## Authentication and content scope
 
@@ -101,8 +194,8 @@ start a fresh capture without `--resume-from`.
 The archive preserves whatever the API returns for the requesting session. A valid post response
 can contain a preview, null body, or paid-audience metadata; completion does not imply access to the
 full post. This tool does not bypass access restrictions. HTML and embedded metadata are preserved
-inside JSON. Image, audio, and video binaries are not downloaded. Comments, Notes, chats, standalone
-profiles, and publication discovery are outside the current capture scope.
+inside JSON. Image, audio, and video binaries are not downloaded. The publication downloader does
+not fetch comments, Notes, chats, standalone profiles, or publication discovery data.
 
 These publication routes are an undocumented web API with no schema stability guarantee. The
 implementation was checked against public responses from `on.substack.com` on September 15, 2026.
@@ -121,17 +214,22 @@ jq -r '[.data.id, .data.title, .data.canonical_url] | @csv' data/on.jsonl
 archivindex-substack-scraper export --include-pages data/on-01.warc.gz > data/all-responses.jsonl
 ```
 
-Each file starts with a WARC 1.1 `warcinfo` record identifying the filename, software/version,
-format, and User-Agent. Each request writes linked `request`, `response`, and `metadata` records.
-All refer to the initial record through `WARC-Warcinfo-ID`; responses link to requests and metadata
-links to both through `WARC-Concurrent-To`. Metadata contains `fetchTimeMs`, the time spent fetching
-and preparing the response in milliseconds.
+Each file starts with the archiver's WARC 1.1 `warcinfo` record, identifying the session, software,
+User-Agent, and any proxy without its credentials. Captured exchanges have linked `request`,
+`response`, and `metadata` records. Responses link to requests through `WARC-Concurrent-To`, and
+metadata links to responses. Metadata records timing and discovery provenance. Each post request
+names the listing that discovered it when that listing belongs to the current segment.
 
-HTTP records contain reconstructed HTTP/1.1 headers and entity bytes, with transfer framing
-normalized after HTTP decoding. They are not byte-for-byte wire captures. Query strings are included
-in archived request targets. Requests use a 60-second timeout and 16 MiB body limit by default,
-configurable through the library. If the response body fails or exceeds the limit, only the request
-and fetch-time metadata are retained, and the lookup remains eligible for resume.
+The archiver records HTTP request and response bytes, including response transfer framing. The
+reader decodes transfer framing when extracting JSON. Publication requests have a 60-second socket
+idle timeout and total capture time limit, excluding DNS, and a 16 MiB response limit including
+headers. Configure these through `Config::timeout` and `Config::max_response_bytes` in the library;
+`max_response_bytes` replaces the former body-only `max_body_bytes` setting.
+
+Responses cut short by a disconnect, timeout, or size limit are retained with `WARC-Truncated`.
+They stop capture and never count as completed posts, even if the captured prefix is valid JSON or
+the status is 404. A failure before response headers arrive reports an error without an HTTP
+exchange to record. Earlier captures remain available for resume.
 
 Offline readers recognize the supported API paths on any HTTP(S) origin, including custom domains,
 and skip unrelated paths, revisits, and records marked truncated. The downloader always stores full
@@ -143,23 +241,29 @@ Install the workspace policy checker at the revision used by CI:
 
 ```console
 cargo install --locked --git https://github.com/travisbrown/archivindex \
-  --rev f6e131cb8255090c5384f6cdcb099348247ad1ff cargo-archivindex-build
+  --rev 527867ddf5b1eaaff23413a0a40da4a62d8e360e cargo-archivindex-build
 ```
 
 Run the development checks:
 
 ```console
 cargo archivindex-build check
-cargo fmt --all -- --check
+cargo +nightly fmt --all -- --check
+taplo fmt --check --diff
+taplo lint
+rumdl check .
+cargo deny --workspace check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
 
-Formatting uses the same nightly rustfmt options as the sibling projects. Tests use synthetic data
-and local HTTP servers; they require no live Substack access or credentials. CI also checks Rust
-1.97 compatibility and the shared Archivindex workspace policy. `Cargo.lock` records resolved
-dependencies, including the shared WARC library's Git revision.
+Formatting uses nightly rustfmt, Taplo 0.10, and rumdl 0.2.73, matching the sibling projects.
+`cargo archivindex-build sync` applies shared configuration fixes; run the formatters and checks
+afterward. Tests use synthetic data and local HTTP servers; they require no live Substack access or
+credentials. CI checks Rust 1.98 compatibility and tests both locked dependencies and the newest
+compatible releases. `Cargo.lock` records resolved dependencies, including the shared Archivindex
+libraries' Git revisions.
 
 ## API references
 

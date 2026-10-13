@@ -1,10 +1,11 @@
 //! Capture and resume against deterministic local HTTP servers, without live Substack access.
 
+mod common;
+
 use std::collections::BTreeSet;
-use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use archivindex_substack_scraper::{
     CaptureKind, Config, Downloader, Error, ResumeState, read_archive,
@@ -13,7 +14,6 @@ use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
-use archivindex_warc::record::fields::metadata::MetadataField;
 use chrono::Utc;
 use serde_json::{Value, json};
 
@@ -27,38 +27,18 @@ fn page(posts: &[Value]) -> String {
 }
 
 fn server(responses: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let base = format!("http://{}/", listener.local_addr().unwrap());
-    let handle = std::thread::spawn(move || {
-        let mut requests = Vec::new();
-        for (status, body) in responses {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "timed out waiting for request");
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(e) => panic!("accept: {e}"),
-                }
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut byte = [0];
-            while !request.ends_with(b"\r\n\r\n") {
-                stream.read_exact(&mut byte).unwrap();
-                request.push(byte[0]);
-            }
-            requests.push(String::from_utf8(request).unwrap());
-            write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nRetry-After: 3600\r\nLocation: https://other.example/\r\n\r\n{body}", body.len()).unwrap();
-        }
-        requests
-    });
-    (base, handle)
+    common::server(
+        responses
+            .into_iter()
+            .map(|(status, body)| {
+                (
+                    status,
+                    "Retry-After: 3600\r\nLocation: https://other.example/\r\n".into(),
+                    body,
+                )
+            })
+            .collect(),
+    )
 }
 
 fn config(gzip: bool) -> Config {
@@ -133,9 +113,9 @@ fn paginates_short_pages_archives_missing_posts_and_links_records() -> Result<()
             let Record::Request { header, body } = request else {
                 panic!("expected request")
             };
-            let archived = archivindex_warc::record::http::RequestMetadata::parse(body).unwrap();
+            let archived = archivindex_http::message::RequestMetadata::parse(body).unwrap();
             let sent =
-                archivindex_warc::record::http::RequestMetadata::parse(requests[index].as_bytes())
+                archivindex_http::message::RequestMetadata::parse(requests[index].as_bytes())
                     .unwrap();
             assert_eq!(archived.method(), sent.method());
             assert_eq!(archived.target(), sent.target());
@@ -158,19 +138,12 @@ fn paginates_short_pages_archives_missing_posts_and_links_records() -> Result<()
             assert_eq!(meta_header.target_uri.as_ref(), Some(&header.target_uri));
             assert_eq!(
                 metadata.concurrent_to(),
-                [
-                    request.core().record_id.clone(),
-                    response.core().record_id.clone()
-                ]
+                [response.core().record_id.clone()]
             );
             let archivindex_warc::record::FieldsBlock::Fields(fields) = meta_body else {
                 panic!("expected fields")
             };
             assert!(fields.fetch_time_ms().is_some());
-            assert_eq!(
-                fields.iter().map(|(field, _)| field).collect::<Vec<_>>(),
-                [&MetadataField::FetchTimeMs]
-            );
         }
         let before = std::fs::read(&path)?;
         assert!(downloader.archive(&ResumeState::default(), &path).is_err());
@@ -245,14 +218,15 @@ fn http_errors_are_retained_and_retryable_including_listing_404() -> Result<(), 
         let error = Downloader::new(config(false), &base)?
             .archive_with_progress(&ResumeState::default(), &path, |n| progress.push(n))
             .unwrap_err();
-        assert!(error.to_string().contains(&format!("HTTP {status}")));
-        assert!(error.to_string().contains("Retry-After: 3600"));
+        assert!(error.to_string().contains(&status.to_string()), "{error}");
         assert_eq!(progress, [0, 1]);
         assert_eq!(handle.join().unwrap().len(), 3);
         let contents = read_archive(&path)?;
         assert_eq!(contents.resume.completed_posts(), 1);
         assert_eq!(contents.status_counts[&status], 1);
-        assert!(std::fs::read_to_string(path)?.contains(&format!("HTTP/1.1 {status}")));
+        let raw = std::fs::read_to_string(path)?;
+        assert!(raw.contains(&format!("HTTP/1.1 {status}")));
+        assert!(raw.contains("Retry-After: 3600"));
     }
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("missing-listing.warc");
@@ -334,43 +308,20 @@ fn duplicate_posts_are_skipped_and_repeated_pages_stop_the_run() -> Result<(), E
 }
 
 #[test]
-fn oversized_and_transport_failures_preserve_attempt_metadata() -> Result<(), Error> {
+fn failures_before_response_headers_leave_a_readable_archive() -> Result<(), Error> {
     let dir = tempfile::tempdir()?;
-    let (base, handle) = server(vec![(200, page(&[post(1, "one")]))]);
-    let mut settings = config(false);
-    settings.max_body_bytes = 4;
-    let path = dir.path().join("oversized.warc");
-    assert!(
-        Downloader::new(settings, &base)?
-            .archive(&ResumeState::default(), &path)
-            .is_err()
-    );
-    handle.join().unwrap();
-    assert_eq!(records(&path, false)?.len(), 3);
-    assert!(read_archive(path)?.captures.is_empty());
-
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let base = format!("http://{}/", listener.local_addr()?);
     drop(listener);
     let path = dir.path().join("transport.warc");
-    let mut settings = config(false);
-    settings.cookie = None;
     assert!(
-        Downloader::new(settings, &base)?
+        Downloader::new(config(false), &base)?
             .archive(&ResumeState::default(), &path)
             .is_err()
     );
-    let records = records(&path, false)?;
-    assert_eq!(records.len(), 3);
-    let Record::Request { body, .. } = &records[1] else {
-        panic!("expected request")
-    };
-    assert!(!String::from_utf8_lossy(body).contains("cookie"));
-    assert!(matches!(records[2], Record::Metadata { .. }));
-    assert_eq!(
-        records[2].concurrent_to(),
-        [records[1].core().record_id.clone()]
-    );
+    let recorded = records(&path, false)?;
+    assert_eq!(recorded.len(), 1);
+    assert!(matches!(recorded[0], Record::Warcinfo { .. }));
     assert!(read_archive(path)?.captures.is_empty());
     Ok(())
 }
