@@ -2,32 +2,89 @@ name: CI
 on: [push, pull_request]
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  check:
+  format:
+    name: Rust formatting
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+      - run: cargo +nightly fmt --all -- --check
+
+  markdown:
+    name: Markdown formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: rumdl@0.2.73
+      - run: rumdl check .
+
+  toml:
+    name: TOML formatting and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: taplo@0.10
+      - run: taplo fmt --check --diff
+      - run: taplo lint
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install workspace policy checker
         run: >-
           cargo install --locked --git https://github.com/travisbrown/archivindex
-          --rev f6e131cb8255090c5384f6cdcb099348247ad1ff cargo-archivindex-build
+          --rev 527867ddf5b1eaaff23413a0a40da4a62d8e360e cargo-archivindex-build
       - name: Check workspace policy
         run: cargo archivindex-build check
-      - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features
       - run: cargo doc --locked --workspace --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  fresh-deps:
+    name: Test with the newest compatible dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo update
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+
+  deny:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny --workspace check
+
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.0
-      - run: cargo check --locked --workspace --all-targets
+          toolchain: 1.98.0
+      - run: cargo check --locked --workspace --all-targets --all-features

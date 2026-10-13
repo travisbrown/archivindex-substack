@@ -13,7 +13,7 @@ workspace layout of `archivindex-gravatar` and `archivindex-wordpress`, using th
 
 ## Getting started
 
-Requires Rust 1.97 or later. Install the CLI:
+Requires Rust 1.98 or later. Install the CLI:
 
 ```console
 cargo install --locked --path tools/scraper-cli
@@ -143,23 +143,29 @@ Install the workspace policy checker at the revision used by CI:
 
 ```console
 cargo install --locked --git https://github.com/travisbrown/archivindex \
-  --rev f6e131cb8255090c5384f6cdcb099348247ad1ff cargo-archivindex-build
+  --rev 527867ddf5b1eaaff23413a0a40da4a62d8e360e cargo-archivindex-build
 ```
 
 Run the development checks:
 
 ```console
 cargo archivindex-build check
-cargo fmt --all -- --check
+cargo +nightly fmt --all -- --check
+taplo fmt --check --diff
+taplo lint
+rumdl check .
+cargo deny --workspace check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
 
-Formatting uses the same nightly rustfmt options as the sibling projects. Tests use synthetic data
-and local HTTP servers; they require no live Substack access or credentials. CI also checks Rust
-1.97 compatibility and the shared Archivindex workspace policy. `Cargo.lock` records resolved
-dependencies, including the shared WARC library's Git revision.
+Formatting uses nightly rustfmt, Taplo 0.10, and rumdl 0.2.73, matching the sibling projects.
+`cargo archivindex-build sync` applies shared configuration fixes; run the formatters and checks
+afterward. Tests use synthetic data and local HTTP servers; they require no live Substack access or
+credentials. CI checks Rust 1.98 compatibility and tests both locked dependencies and the newest
+compatible releases. `Cargo.lock` records resolved dependencies, including the shared Archivindex
+libraries' Git revisions.
 
 ## API references
 

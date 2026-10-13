@@ -133,9 +133,9 @@ fn paginates_short_pages_archives_missing_posts_and_links_records() -> Result<()
             let Record::Request { header, body } = request else {
                 panic!("expected request")
             };
-            let archived = archivindex_warc::record::http::RequestMetadata::parse(body).unwrap();
+            let archived = archivindex_http::message::RequestMetadata::parse(body).unwrap();
             let sent =
-                archivindex_warc::record::http::RequestMetadata::parse(requests[index].as_bytes())
+                archivindex_http::message::RequestMetadata::parse(requests[index].as_bytes())
                     .unwrap();
             assert_eq!(archived.method(), sent.method());
             assert_eq!(archived.target(), sent.target());
