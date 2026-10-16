@@ -18,14 +18,15 @@ rustdoc-args = ["--cfg", "docsrs"]
 workspace = true
 
 [dependencies]
+archivindex-archiver.workspace = true
 archivindex-http.workspace = true
 archivindex-substack-model.workspace = true
 archivindex-warc.workspace = true
-chrono.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+chrono.workspace = true

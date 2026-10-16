@@ -7,6 +7,9 @@ details, while `Byline` represents an author. Both retain unknown fields for API
 missing or null values; serializing a model omits those values. Use the original JSON when that
 distinction matters.
 
+`profile::PublicProfile` models the numeric user ID and profile slug, preserving every other field
+as JSON. Unlike post slugs, profile slugs can be empty and do not share the post-slug alphabet.
+
 See the [workspace README](../../README.md) for capture behavior and supported API routes.
 
 ## License

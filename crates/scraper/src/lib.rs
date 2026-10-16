@@ -1,17 +1,20 @@
-//! Download Substack publication posts and preserve HTTP exchanges in WARC archives.
+//! Resolve Substack users, download publication posts, and preserve HTTP exchanges in WARC archives.
 //!
-//! Capture is sequential. Every exchange is flushed before validation or the next request.
+//! Publication capture is sequential. Each exchange is flushed before the next request.
 //! Resume retries previously discovered posts and walks current listings from offset zero.
 
 mod capture;
 mod read;
+pub mod resolve;
+mod transport;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
 
+use archivindex_archiver::session::RetryConfig;
 use archivindex_substack_model::{Post, Slug};
-use reqwest::blocking::Client;
 use reqwest::header::HeaderValue;
 use serde::Serialize;
 use serde_json::Value;
@@ -24,29 +27,32 @@ const SOFTWARE: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERS
 
 /// Settings for a sequential publication capture.
 pub struct Config {
+    /// SOCKS5 proxy URL. Use `socks5h://` for remote DNS. Environment proxies are ignored.
+    pub proxy: Option<String>,
     /// Optional Cookie header for this publication, also preserved in WARC request records.
     pub cookie: Option<String>,
     /// Minimum interval between request starts (default two seconds, not an API quota guarantee).
     pub delay: Duration,
-    /// Timeout for each request, including its response body.
+    /// Socket idle timeout and total capture time limit, excluding DNS (default 60 seconds).
     pub timeout: Duration,
-    /// Maximum response body size in bytes.
-    pub max_body_bytes: u64,
+    /// Maximum captured response size, including headers (default 16 MiB).
+    pub max_response_bytes: u64,
     /// Requested number of summaries per archive page, from 1 through 100.
     pub page_size: usize,
     /// Stop successfully after this many post lookups in this segment; listings do not count.
     pub max_posts: Option<usize>,
-    /// Compress each WARC record in its own gzip member.
+    /// Compress WARC records. A `.gz` output suffix also enables compression.
     pub gzip: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            proxy: None,
             cookie: None,
             delay: Duration::from_secs(2),
             timeout: Duration::from_secs(60),
-            max_body_bytes: 16 * 1024 * 1024,
+            max_response_bytes: 16 * 1024 * 1024,
             page_size: 20,
             max_posts: None,
             gzip: false,
@@ -56,7 +62,6 @@ impl Default for Config {
 
 /// A downloader bound to one publication origin. Redirects are archived without being followed.
 pub struct Downloader {
-    client: Client,
     config: Config,
     base: Url,
     cookie: Option<HeaderValue>,
@@ -70,12 +75,12 @@ impl Downloader {
     pub fn new(config: Config, publication: &str) -> Result<Self, Error> {
         let base = publication_url(publication)?;
         if config.timeout.is_zero()
-            || config.max_body_bytes == 0
-            || config.max_body_bytes == u64::MAX
+            || config.max_response_bytes == 0
+            || config.max_response_bytes == u64::MAX
             || !(1..=100).contains(&config.page_size)
             || config.max_posts == Some(0)
         {
-            return Err("timeout, body limit, and max-posts must be positive; body limit must be below u64::MAX; page size must be 1..=100".into());
+            return Err("timeout, response limit, and max-posts must be positive; response limit must be below u64::MAX; page size must be 1..=100".into());
         }
         let cookie = config
             .cookie
@@ -91,99 +96,33 @@ impl Downloader {
                 Ok::<_, Error>(value)
             })
             .transpose()?;
-        let client = Client::builder()
-            .user_agent(SOFTWARE)
-            .http1_only()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .no_zstd()
-            .timeout(config.timeout)
-            .build()?;
         Ok(Self {
-            client,
             config,
             base,
             cookie,
         })
     }
 
-    /// Archive all discoverable posts, skipping successful post lookups from previous segments.
+    /// Look up a public IP through the same transport and proxy as publication capture.
     ///
-    /// Output is created exclusively. Valid post responses and post 404s count as completed.
-    /// Other HTTP statuses, malformed data, and transport failures stop the run. Earlier records
-    /// remain readable. A configured post limit creates a partial segment suitable for resume.
-    pub fn archive(&self, resume: &ResumeState, output: impl AsRef<Path>) -> Result<usize, Error> {
-        self.archive_with_progress(resume, output, |_| {})
+    /// The endpoint must return a plain IPv4 or IPv6 address with status 200. The check makes one
+    /// attempt, retains no WARC, and never sends the publication cookie.
+    pub fn public_ip(&self, endpoint: &str) -> Result<IpAddr, Error> {
+        self.transport()?.public_ip(endpoint)
     }
 
-    /// Archive with a notification after each completed post lookup has been flushed.
-    ///
-    /// The first notification is zero. Listings and skipped posts do not advance the count.
-    pub fn archive_with_progress(
-        &self,
-        resume: &ResumeState,
-        output: impl AsRef<Path>,
-        mut progress: impl FnMut(usize),
-    ) -> Result<usize, Error> {
-        let mut session = capture::Session::new(self, output.as_ref())?;
-        progress(0);
-        let mut completed = resume.completed.clone();
-        let mut count = 0;
-        // Earlier listings may contain posts that have since disappeared from the current archive.
-        for url in &resume.discovered {
-            let url = Url::parse(url)?;
-            if url.origin() == self.base.origin() && !completed.contains(url.as_str()) {
-                session.fetch(&url)?;
-                completed.insert(url.to_string());
-                count += 1;
-                progress(count);
-                if self.config.max_posts.is_some_and(|limit| count >= limit) {
-                    return Ok(count);
-                }
-            }
-        }
-        let mut offset = 0usize;
-        let mut listed = BTreeSet::new();
-        loop {
-            let mut url = self.base.join("api/v1/archive")?;
-            url.query_pairs_mut()
-                .append_pair("sort", "new")
-                .append_pair("offset", &offset.to_string())
-                .append_pair("limit", &self.config.page_size.to_string());
-            let value = session
-                .fetch(&url)?
-                .ok_or("archive listing returned no data")?;
-            let posts: Vec<Post> = serde_json::from_value(value)?;
-            if posts.is_empty() {
-                return Ok(count);
-            }
-            let mut new_ids = 0;
-            for post in &posts {
-                if !listed.insert(post.id) {
-                    continue;
-                }
-                new_ids += 1;
-                let url = self.base.join(&format!("api/v1/posts/{}", post.slug))?;
-                if !completed.contains(url.as_str()) {
-                    session.fetch(&url)?;
-                    completed.insert(url.to_string());
-                    count += 1;
-                    progress(count);
-                    if self.config.max_posts.is_some_and(|limit| count >= limit) {
-                        return Ok(count);
-                    }
-                }
-            }
-            if new_ids == 0 {
-                return Err("archive pagination made no progress; repeated post IDs; completed records retained".into());
-            }
-            // Continue even after a short page: the service can cap the requested limit.
-            offset = offset
-                .checked_add(posts.len())
-                .ok_or("archive offset overflow")?;
-        }
+    fn transport(&self) -> Result<transport::Transport, Error> {
+        transport::Transport::new(
+            self.config.proxy.clone(),
+            self.config.delay,
+            self.config.timeout,
+            self.config.max_response_bytes,
+            RetryConfig {
+                attempts: 1,
+                ..RetryConfig::default()
+            },
+            self.config.gzip,
+        )
     }
 }
 
@@ -270,6 +209,10 @@ fn publication_url(input: &str) -> Result<Url, Error> {
         }
         Url::parse(&format!("https://{input}.substack.com/"))?
     };
+    validate_origin(url)
+}
+
+fn validate_origin(url: Url) -> Result<Url, Error> {
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || url.path() != "/"
@@ -278,7 +221,10 @@ fn publication_url(input: &str) -> Result<Url, Error> {
         || !url.username().is_empty()
         || url.password().is_some()
     {
-        return Err("publication URL must be an HTTP(S) origin without a path, credentials, query, or fragment".into());
+        return Err(
+            "base URL must be an HTTP(S) origin without a path, credentials, query, or fragment"
+                .into(),
+        );
     }
     Ok(url)
 }
