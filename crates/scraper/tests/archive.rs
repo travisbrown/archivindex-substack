@@ -14,7 +14,7 @@ use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
-use chrono::Utc;
+use jiff::Timestamp;
 use serde_json::{Value, json};
 
 fn post(id: u64, slug: &str) -> Value {
@@ -337,7 +337,7 @@ fn write_response(
         "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n\r\n{body}",
         length.unwrap_or(body.len())
     );
-    let record: Record = Record::response(url, Utc::now())?.body(message.into_bytes())?;
+    let record: Record = Record::response(url, Timestamp::now())?.body(message.into_bytes())?;
     writer.write(&record.into_raw()?)?;
     Ok(())
 }

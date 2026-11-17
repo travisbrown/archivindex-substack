@@ -29,4 +29,4 @@ tempfile.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
+jiff.workspace = true

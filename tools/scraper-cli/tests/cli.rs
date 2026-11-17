@@ -4,7 +4,7 @@ use std::process::Command;
 
 use archivindex_warc::io::write::{Compression, WarcWriter};
 use archivindex_warc::record::Record;
-use chrono::Utc;
+use jiff::Timestamp;
 use serde_json::{Value, json};
 
 fn cli() -> Command {
@@ -15,6 +15,8 @@ fn cli() -> Command {
 fn export_preserves_nulls_and_versions_and_inspect_reports_failures() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fixture.data");
+    let captured_at = "2026-11-17T12:34:56.123456789Z";
+    let timestamp: Timestamp = captured_at.parse().unwrap();
     let mut writer = WarcWriter::new(std::fs::File::create(&path).unwrap())
         .with_compression(Compression::gzip());
     let first = json!({"id": 1, "publication_id": 3, "slug": "one", "title": "First", "body_html": null, "unknown": {"a": 1}});
@@ -38,7 +40,7 @@ fn export_preserves_nulls_and_versions_and_inspect_reports_failures() {
         );
         let record: Record = Record::response(
             &format!("https://example.substack.com/api/v1/{endpoint}"),
-            Utc::now(),
+            timestamp,
         )
         .unwrap()
         .body(message.into_bytes())
@@ -61,7 +63,8 @@ fn export_preserves_nulls_and_versions_and_inspect_reports_failures() {
     assert_eq!(rows[0]["data"], first);
     assert_eq!(rows[1]["data"], second);
     assert_eq!(rows[0]["kind"], "post");
-    assert!(rows[0]["captured_at"].is_string());
+    assert_eq!(rows[0]["captured_at"], captured_at);
+    assert_eq!(rows[1]["captured_at"], captured_at);
     let output = cli()
         .arg("export")
         .arg("--include-pages")
