@@ -4,11 +4,12 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use archivindex_cli_support::Verbosity;
 use archivindex_substack_scraper::resolve::{Config as ResolveConfig, Handle, Resolver};
 use archivindex_substack_scraper::{
     CaptureKind, Config, Downloader, Error, ResumeState, read_archive,
 };
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
@@ -17,6 +18,8 @@ use indicatif::{ProgressBar, ProgressStyle};
     about = "Resolve Substack users and archive publication posts"
 )]
 struct Options {
+    #[command(flatten)]
+    verbosity: Verbosity,
     #[command(subcommand)]
     command: Command,
 }
@@ -152,28 +155,32 @@ fn resolve(arguments: &ResolveOptions, resolution: Resolution) -> Result<(), Err
         Resolution::Handle => match resolver.resolve_handle(user_id, options.output.as_deref())? {
             Some(Handle::Set(handle)) => writeln!(std::io::stdout().lock(), "{handle}")?,
             Some(Handle::Unset) => {
-                eprintln!("User {user_id} exists but has no handle");
+                tracing::warn!("User {user_id} exists but has no handle");
             }
-            None => eprintln!("No user with id {user_id}"),
+            None => tracing::warn!("No user with id {user_id}"),
         },
-        Resolution::Slug => match resolver.resolve_slug(user_id, options.output.as_deref())? {
-            Some(slug) => writeln!(std::io::stdout().lock(), "{slug}")?,
-            None => eprintln!("No slug for user id {user_id}"),
-        },
-        Resolution::User => match resolver.resolve_user(user_id, options.output.as_deref())? {
-            Some(profile) => {
+        Resolution::Slug => {
+            if let Some(slug) = resolver.resolve_slug(user_id, options.output.as_deref())? {
+                writeln!(std::io::stdout().lock(), "{slug}")?;
+            } else {
+                tracing::warn!("No slug for user id {user_id}");
+            }
+        }
+        Resolution::User => {
+            if let Some(profile) = resolver.resolve_user(user_id, options.output.as_deref())? {
                 let mut out = std::io::stdout().lock();
                 serde_json::to_writer(&mut out, &profile)?;
                 writeln!(out)?;
+            } else {
+                tracing::warn!("No profile for user id {user_id}");
             }
-            None => eprintln!("No profile for user id {user_id}"),
-        },
+        }
     }
     Ok(())
 }
 
 impl ArchiveOptions {
-    fn run(self) -> Result<(), Error> {
+    fn run(self, verbosity: &Verbosity) -> Result<(), Error> {
         let Self {
             network,
             publication,
@@ -210,7 +217,12 @@ impl ArchiveOptions {
             let address = downloader.public_ip("https://api.ipify.org/")?;
             eprintln!("Public IP address: {address}");
         }
-        let progress = ProgressBar::new_spinner().with_style(ProgressStyle::with_template(
+        let progress = if verbosity.is_quiet() || verbosity.is_verbose() {
+            ProgressBar::hidden()
+        } else {
+            ProgressBar::new_spinner()
+        }
+        .with_style(ProgressStyle::with_template(
             "{spinner:.green} [{elapsed_precise}] {pos} post lookups archived {msg}",
         )?);
         progress.enable_steady_tick(Duration::from_millis(100));
@@ -220,7 +232,7 @@ impl ArchiveOptions {
         match result {
             Ok(count) => {
                 progress.finish_and_clear();
-                eprintln!("Archived {count} post lookups to {}", output.display());
+                tracing::info!("Archived {count} post lookups to {}", output.display());
             }
             Err(error) => {
                 progress.abandon_with_message("Stopped");
@@ -231,23 +243,22 @@ impl ArchiveOptions {
     }
 }
 
-fn run() -> Result<(), Error> {
-    match Options::parse().command {
+fn run(options: Options) -> Result<(), Error> {
+    match options.command {
         Command::LookupHandle { handle, options } => {
-            match options
+            if let Some(profile) = options
                 .resolver()?
                 .lookup_handle(&handle, options.output.as_deref())?
             {
-                Some(profile) => {
-                    writeln!(std::io::stdout().lock(), "{}-{}", profile.id, profile.slug)?;
-                }
-                None => eprintln!("No profile for handle {handle}"),
+                writeln!(std::io::stdout().lock(), "{}-{}", profile.id, profile.slug)?;
+            } else {
+                tracing::warn!("No profile for handle {handle}");
             }
         }
         Command::ResolveHandle(options) => resolve(&options, Resolution::Handle)?,
         Command::ResolveSlug(options) => resolve(&options, Resolution::Slug)?,
         Command::ResolveUser(options) => resolve(&options, Resolution::User)?,
-        Command::Archive(options) => options.run()?,
+        Command::Archive(archive) => archive.run(&options.verbosity)?,
         Command::Export {
             archives,
             include_pages,
@@ -284,10 +295,21 @@ fn run() -> Result<(), Error> {
 }
 
 fn main() -> std::process::ExitCode {
-    match run() {
+    let options = Options::parse();
+    // Clap checks conflicts before propagating global arguments across subcommands.
+    if options.verbosity.is_quiet() && options.verbosity.is_verbose() {
+        Options::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--quiet cannot be used with -v",
+            )
+            .exit();
+    }
+    options.verbosity.init_logging();
+    match run(options) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            tracing::error!("{error}");
             std::process::ExitCode::FAILURE
         }
     }

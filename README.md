@@ -24,6 +24,12 @@ Capture a publication by its Substack subdomain slug or full origin URL. Custom 
 supported when supplied as full URLs. Use the publication's current canonical origin; redirects are
 recorded and stop the run, with the destination included in the error.
 
+Diagnostics use tracing and go to stderr. All commands accept `-q` or `--quiet` for errors only,
+`-v` for informational messages (including the archive completion summary), `-vv` for debug, and
+`-vvv` for trace output. The default shows warnings and errors, including missing-profile notices.
+Quiet and verbose flags conflict. Command results on stdout and an explicitly requested
+`--show-ip` result are unaffected by verbosity.
+
 ```sh
 mkdir -p data
 archivindex-substack-scraper archive --publication on --output data/on-01.warc.gz
@@ -140,7 +146,8 @@ with an error to prevent an endless pagination loop.
 
 Requests start at least two seconds apart by default. `--delay SECONDS` overrides this interval;
 the default is a conservative local setting, not a documented service quota. A terminal spinner on
-stderr shows elapsed time and completed post lookups. It is hidden when stderr is not a terminal.
+stderr shows elapsed time and completed post lookups. It is hidden when stderr is not a terminal,
+or when quiet or verbose output is selected.
 
 Every capture is flushed to `<output>.partial` before the next request. The requested output file
 appears when the run finishes, including when an HTTP or validation error stops it. Resume into a

@@ -177,7 +177,7 @@ fn invalid_proxies_stop_capture_without_recording_or_exposing_credentials() {
         ] {
             for show_ip in [false, true] {
                 let mut cmd = cli();
-                cmd.arg(command);
+                cmd.args(["-vvv", command]);
                 if command == "archive" {
                     cmd.args(["--publication", "example"]);
                 } else {

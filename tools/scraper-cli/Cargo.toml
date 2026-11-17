@@ -17,10 +17,12 @@ doc = false
 workspace = true
 
 [dependencies]
+archivindex-cli-support.workspace = true
 archivindex-substack-scraper.workspace = true
 clap.workspace = true
 indicatif.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 archivindex-warc.workspace = true
